@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 const int serverPort = 8080;
 
@@ -24,16 +23,40 @@ void main() async {
 
 void handleClient(HttpRequest request) async {
   try {
+    final uri = request.uri;
+    // Upgrade to WebSocket.
     WebSocket webSocket = await WebSocketTransformer.upgrade(request);
     print("🔗 New client connected from ${request.connectionInfo?.remoteAddress}");
 
-    // Start aplay with tuned buffer settings: lower buffer (-B) and period (-F) times.
+    // Check connection type by query parameter.
+    final type = uri.queryParameters['type'] ?? 'audio';
+    if (type == 'control') {
+      // For control connections, just handle ping/pong.
+      webSocket.listen(
+        (data) {
+          if (data is String && data.startsWith("ping:")) {
+            final response = data.replaceFirst("ping", "pong");
+            webSocket.add(response);
+            print("💬 Ping received. Sent pong: $response");
+          }
+        },
+        onDone: () {
+          print("🔌 Control connection closed.");
+        },
+        onError: (error) {
+          print("❌ Control connection error: $error");
+        },
+      );
+      return;
+    }
+
+    // For audio connections, start aplay.
     final process = await Process.start(
       "aplay",
-      ["-c", "1", "-f", "S16_LE", "-r", "16000", "-B", "2000", "-F", "500"],
+      ["-c", "1", "-f", "S16_LE", "-r", "44100", "-B", "1000", "-F", "250"],
     );
 
-    // Monitor aplay's stdout and stderr to verify it is receiving data.
+    // Monitor aplay's stdout and stderr.
     process.stdout.transform(SystemEncoding().decoder).listen((data) {
       print("aplay stdout: $data");
     });
@@ -44,20 +67,23 @@ void handleClient(HttpRequest request) async {
       print("aplay process exited with code: $code");
     });
 
-    // Listen for incoming audio data from the WebSocket.
+    // Listen for incoming messages from the WebSocket.
     webSocket.listen(
       (data) {
+        // Only process binary data as audio.
         if (data is Uint8List) {
           print("🎵 Streaming audio data: ${data.length} bytes");
           process.stdin.add(data);
+        } else {
+          print("⚠️ Received non-binary data on audio connection.");
         }
       },
       onDone: () {
-        print("🔌 Client disconnected.");
+        print("🔌 Audio client disconnected.");
         process.stdin.close();
       },
       onError: (error) {
-        print("❌ WebSocket error: $error");
+        print("❌ WebSocket error on audio connection: $error");
       },
     );
   } catch (e) {
